@@ -1,87 +1,76 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
-import 'dart:convert';
 
 class ResumableChunkUploader {
-  final String serverUrl; //"http://192.168.1.3:8000"
-  static const int chunkSize = 2 * 1024 * 1024; // 2 MegaByte لكل جزء
+  final String serverUrl;
+  static const int chunkSize = 2 * 1024 * 1024;
 
   ResumableChunkUploader({required this.serverUrl});
 
   Future<void> uploadFileWithRetry(String filePath) async {
-    File file = File(filePath);
-    if (!await file.exists()) return;
+    final file = File(filePath);
+    if (!await file.exists()) throw Exception('الملف غير موجود');
 
-    String fileId = file.path.split('/').last;
-    int totalBytes = await file.length();
-    int totalChunks = (totalBytes / chunkSize).ceil();
+    final fileId = file.uri.pathSegments.last;
+    final totalBytes = await file.length();
+    final totalChunks = totalBytes == 0 ? 1 : (totalBytes / chunkSize).ceil();
 
     while (true) {
       try {
-        // 1. الاستعلام عن القطع المرفوعة مسبقاً من السيرفر
-        List<int> uploadedChunks = await _getUploadedChunks(fileId);
-
-        if (uploadedChunks.length == totalChunks) {
-          print("تم رفع وتجميع الملف بنجاح على اللابتوب!");
-          // تأكيد الحذف من الموبايل بعد الاستلام الكامل
-          await file.delete();
-          break;
-        }
-
-        // 2. رفع القطع المتبقية فقط
-        RandomAccessFile randomAccessFile = await file.open(mode: FileMode.read);
-        for (int i = 0; i < totalChunks; i++) {
-          if (uploadedChunks.contains(i)) continue; // تخطي ما تم رفعه
-
-          int start = i * chunkSize;
-          int end = (start + chunkSize > totalBytes) ? totalBytes : start + chunkSize;
-          int length = end - start;
-
-          await randomAccessFile.setPosition(start);
-          List<int> chunkBytes = await randomAccessFile.read(length);
-
-          bool success = await _uploadSingleChunk(fileId, i, totalChunks, chunkBytes);
-          if (!success) {
-            throw Exception("فشل رفع الجزء $i - سيتم إعادة المحاولة...");
+        final uploaded = await _getUploadedChunks(fileId);
+        final raf = await file.open(mode: FileMode.read);
+        try {
+          for (var i = 0; i < totalChunks; i++) {
+            if (uploaded.contains(i)) continue;
+            final start = i * chunkSize;
+            final end = (start + chunkSize > totalBytes) ? totalBytes : start + chunkSize;
+            final length = end - start;
+            await raf.setPosition(start);
+            final bytes = length > 0 ? await raf.read(length) : <int>[];
+            final ok = await _uploadSingleChunk(fileId, i, totalChunks, bytes);
+            if (!ok) throw Exception('فشل رفع الجزء $i');
           }
+        } finally {
+          await raf.close();
         }
-        await randomAccessFile.close();
+
+        final complete = await http.post(
+          Uri.parse('$serverUrl/upload/complete'),
+          headers: {'X-Upload-Id': fileId, 'X-File-Name': fileId, 'X-Total-Chunks': '$totalChunks'},
+        ).timeout(const Duration(seconds: 30));
+        if (complete.statusCode != 200) throw Exception('فشل تجميع الملف: ${complete.body}');
+        return;
       } catch (e) {
-        print("انقطع الاتصال: $e. إعادة المحاولة بعد 5 ثوانٍ...");
-        await Future.delayed(Duration(seconds: 5)); // الانتظار لعودة الواي فاي
+        await Future.delayed(const Duration(seconds: 3));
       }
     }
   }
 
   Future<List<int>> _getUploadedChunks(String fileId) async {
     try {
-      final res = await http.get(Uri.parse('$serverUrl/upload/status/$fileId'));
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-        List<dynamic> list = data['uploaded_chunks'] ?? [];
-        return list.map((e) => e as int).toList();
+      final response = await http.get(Uri.parse('$serverUrl/upload/status/$fileId')).timeout(const Duration(seconds: 10));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        return (data['uploaded_chunks'] as List<dynamic>? ?? []).map((e) => e as int).toList();
       }
     } catch (_) {}
     return [];
   }
 
-  Future<bool> _uploadSingleChunk(String fileId, int chunkIdx, int totalChunks, List<int> bytes) async {
-    var request = http.MultipartRequest('POST', Uri.parse('$serverUrl/upload/chunk'));
-    request.fields['file_id'] = fileId;
-    request.fields['chunk_index'] = chunkIdx.toString();
-    request.fields['total_chunks'] = totalChunks.toString();
-
-    request.files.add(http.MultipartFile.fromBytes(
-      'file',
-      bytes,
-      filename: 'chunk_$chunkIdx',
-    ));
-
+  Future<bool> _uploadSingleChunk(String fileId, int index, int totalChunks, List<int> bytes) async {
     try {
-      var streamedResponse = await request.send();
-      var response = await http.Response.fromStream(streamedResponse);
+      final response = await http.post(
+        Uri.parse('$serverUrl/upload/chunk'),
+        headers: {
+          'X-Upload-Id': fileId,
+          'X-Chunk-Index': '$index',
+          'X-File-Name': fileId,
+        },
+        body: bytes,
+      ).timeout(const Duration(seconds: 60));
       return response.statusCode == 200;
-    } catch (e) {
+    } catch (_) {
       return false;
     }
   }
