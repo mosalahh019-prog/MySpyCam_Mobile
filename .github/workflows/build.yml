@@ -1,0 +1,23 @@
+name: myspycam_mobile
+description: "MySpyCam Mobile App"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  camera: ^0.11.0
+  web_socket_channel: ^3.0.0
+  http: ^1.6.0
+  path_provider: ^2.1.6
+  permission_handler: ^13.0.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
